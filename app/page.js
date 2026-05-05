@@ -406,6 +406,16 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString("nl-NL", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+const TYPE_LABELS = {
+  analyse: "Analyse",
+  motie: "Motie",
+  amendement: "Amendement",
+  vragen: "Schriftelijke vragen",
+  vergadering: "Vergadering",
+  reactie: "Inwoner reactie",
+  debat: "Debat",
+};
+
 function renderMarkdown(text) {
   if (!text) return "";
   const lines = text.split("\n");
@@ -698,8 +708,10 @@ export default function David() {
     setReady(true);
     const pw = lsGet("david-pw");
     setAuthState(pw ? "login" : "setup");
-    const raw = lsGet("david-analyses");
-    if (raw) try { setSaved(JSON.parse(raw)); } catch {}
+    fetch("/api/analyses")
+      .then((r) => r.ok ? r.json() : [])
+      .then((list) => Array.isArray(list) && setSaved(list))
+      .catch(() => {});
   }, []);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMsgs, chatLoading]);
@@ -739,6 +751,13 @@ export default function David() {
     } finally { setUploadLoading(false); e.target.value = ""; }
   };
 
+  const saveToArchive = (type, title, content) => {
+    const item = { id: Date.now().toString(36), type, title: title || TYPE_LABELS[type], date: new Date().toISOString(), content };
+    const updated = [item, ...saved].slice(0, 50);
+    setSaved(updated);
+    fetch("/api/analyses", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item) }).catch(() => {});
+  };
+
   // ── ANALYSE ──
   const handleAnalyze = async () => {
     if (!docText.trim()) return;
@@ -747,10 +766,7 @@ export default function David() {
     try {
       const result = await callClaude(SYSTEM_PROMPT, [{ role: "user", content: `Analyseer het volgende document:\n\nTITEL: ${title}\n\nINHOUD:\n${docText.slice(0, 30000)}` }], 5000);
       setAnalysis(result);
-      const item = { id: Date.now().toString(36), title, date: new Date().toISOString(), analysis: result };
-      const updated = [item, ...saved].slice(0, 50);
-      setSaved(updated);
-      lsSet("david-analyses", JSON.stringify(updated));
+      saveToArchive("analyse", title, result);
     } catch (err) { setError("Analyse mislukt: " + err.message); }
     finally { setLoading(false); }
   };
@@ -785,6 +801,7 @@ Schrijf een complete, direct bruikbare motie. Begin met "Motie".`;
     try {
       const result = await callClaude(MOTIE_SYSTEM_PROMPT, [{ role: "user", content: prompt }], 3000);
       setMotieOutput(result); setMotieEdited(result);
+      saveToArchive("motie", motieForm.onderwerp, result);
     } catch (e) { setMotieErr("Generatie mislukt: " + e.message); }
     finally { setMotieLoading(false); }
   };
@@ -807,6 +824,7 @@ Schrijf een compleet, direct bruikbaar amendement. Begin met "Amendement".`;
     try {
       const result = await callClaude(AMENDEMENT_SYSTEM_PROMPT, [{ role: "user", content: prompt }], 3000);
       setAmendOutput(result); setAmendEdited(result);
+      saveToArchive("amendement", amendForm.onderwerp, result);
     } catch (e) { setAmendErr("Generatie mislukt: " + e.message); }
     finally { setAmendLoading(false); }
   };
@@ -826,6 +844,7 @@ Schrijf complete, direct bruikbare schriftelijke vragen.`;
     try {
       const result = await callClaude(VRAGEN_SYSTEM_PROMPT, [{ role: "user", content: prompt }], 2500);
       setVragenOutput(result); setVragenEdited(result);
+      saveToArchive("vragen", vragenForm.onderwerp, result);
     } catch (e) { setVragenErr("Generatie mislukt: " + e.message); }
     finally { setVragenLoading(false); }
   };
@@ -853,9 +872,11 @@ Schrijf complete, direct bruikbare schriftelijke vragen.`;
   const handleVergadering = async () => {
     if (!vergaderText.trim()) return;
     setVergaderLoading(true); setVergaderErr(""); setVergaderResult("");
+    const title = vergaderTitle.trim() || "Vergadering " + new Date().toLocaleDateString("nl-NL");
     try {
       const result = await callClaude(VERGADERING_SYSTEM_PROMPT, [{ role: "user", content: `Bereid de volgende vergadering voor. Analyseer elk agendapunt:\n\n${vergaderText.slice(0, 30000)}` }], 6000);
       setVergaderResult(result);
+      saveToArchive("vergadering", title, result);
     } catch (e) { setVergaderErr("Voorbereiding mislukt: " + e.message); }
     finally { setVergaderLoading(false); }
   };
@@ -875,6 +896,8 @@ Schrijf een persoonlijk, warm maar professioneel antwoord namens Noor.`;
     try {
       const result = await callClaude(REACTIE_SYSTEM_PROMPT, [{ role: "user", content: prompt }], 1500);
       setReactieOutput(result); setReactieEdited(result);
+      const title = reactieInwoner.trim().split("\n")[0].slice(0, 60) || "Inwoner reactie";
+      saveToArchive("reactie", title, result);
     } catch (e) { setReactieErr("Generatie mislukt: " + e.message); }
     finally { setReactieLoading(false); }
   };
@@ -892,13 +915,15 @@ Geef een complete debatvoorbereiding.`;
     try {
       const result = await callClaude(DEBAT_SYSTEM_PROMPT, [{ role: "user", content: prompt }], 4000);
       setDebatResult(result);
+      saveToArchive("debat", debatOnderwerp, result);
     } catch (e) { setDebatErr("Voorbereiding mislukt: " + e.message); }
     finally { setDebatLoading(false); }
   };
 
   const handleDelete = (id) => {
     const updated = saved.filter((a) => a.id !== id);
-    setSaved(updated); lsSet("david-analyses", JSON.stringify(updated));
+    setSaved(updated);
+    fetch(`/api/analyses?id=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
     if (selected?.id === id) setSelected(null);
   };
 
@@ -1375,17 +1400,18 @@ Geef een complete debatvoorbereiding.`;
           {view === "history" && !selected && (
             <div>
               <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Archief</h1>
-              <p style={{ fontSize: 13, color: "#1b2d45", marginBottom: 24 }}>{saved.length} opgeslagen analyse{saved.length !== 1 ? "s" : ""}.</p>
+              <p style={{ fontSize: 13, color: "#1b2d45", marginBottom: 24 }}>{saved.length} opgeslagen item{saved.length !== 1 ? "s" : ""}.</p>
               {saved.length === 0
-                ? <div style={{ textAlign: "center", padding: 60, color: "#1b2d45", fontSize: 13 }}>Nog geen analyses opgeslagen.</div>
+                ? <div style={{ textAlign: "center", padding: 60, color: "#1b2d45", fontSize: 13 }}>Nog niets opgeslagen.</div>
                 : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {saved.map((a) => (
                     <div key={a.id} onClick={() => setSelected(a)}
                       style={{ background: "#f2f4f6", border: "1px solid #d9dde4", borderRadius: 8, padding: "13px 17px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}
                       onMouseEnter={(e) => e.currentTarget.style.background = "#e8ebf0"}
                       onMouseLeave={(e) => e.currentTarget.style.background = "#f2f4f6"}>
-                      <div>
-                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{a.title}</div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 9, color: "#ff5470", fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{TYPE_LABELS[a.type] || "Analyse"}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.title}</div>
                         <div style={{ fontSize: 11, color: "#1b2d45" }}>{formatDate(a.date)}</div>
                       </div>
                       <button onClick={(e) => { e.stopPropagation(); handleDelete(a.id); }}
@@ -1401,21 +1427,25 @@ Geef een complete debatvoorbereiding.`;
           )}
 
           {/* SELECTED */}
-          {view === "history" && selected && (
-            <div>
-              <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: "#ff5470", fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: 0, marginBottom: 20 }}>← Terug naar archief</button>
-              <div style={{ background: "#f2f4f6", border: "1px solid #d9dde4", borderRadius: 10, padding: "26px 30px" }}>
-                <div style={{ fontSize: 10, color: "#ff5470", fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Analyse</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                  <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{selected.title}</h2>
-                  <CopyBtn text={selected.analysis} />
+          {view === "history" && selected && (() => {
+            const body = selected.content || selected.analysis || "";
+            const type = selected.type || "analyse";
+            return (
+              <div>
+                <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: "#ff5470", fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: 0, marginBottom: 20 }}>← Terug naar archief</button>
+                <div style={{ background: "#f2f4f6", border: "1px solid #d9dde4", borderRadius: 10, padding: "26px 30px" }}>
+                  <div style={{ fontSize: 10, color: "#ff5470", fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{TYPE_LABELS[type] || "Analyse"}</div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                    <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{selected.title}</h2>
+                    <CopyBtn text={body} />
+                  </div>
+                  <div style={{ fontSize: 11, color: "#1b2d45", marginBottom: 18 }}>{formatDate(selected.date)}</div>
+                  <div style={{ fontSize: 13 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+                  {type === "analyse" && <FollowUpChat docTitle={selected.title} analysis={body} />}
                 </div>
-                <div style={{ fontSize: 11, color: "#1b2d45", marginBottom: 18 }}>{formatDate(selected.date)}</div>
-                <div style={{ fontSize: 13 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(selected.analysis) }} />
-                <FollowUpChat docTitle={selected.title} analysis={selected.analysis} />
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* PROFIEL */}
           {view === "profiel" && (
