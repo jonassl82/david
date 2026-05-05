@@ -708,10 +708,25 @@ export default function David() {
     setReady(true);
     const pw = lsGet("david-pw");
     setAuthState(pw ? "login" : "setup");
-    fetch("/api/analyses")
-      .then((r) => r.ok ? r.json() : [])
-      .then((list) => Array.isArray(list) && setSaved(list))
-      .catch(() => {});
+    (async () => {
+      // Eenmalige migratie van oude localStorage-archieven naar Redis
+      if (lsGet("david-migrated") !== "1") {
+        const raw = lsGet("david-analyses");
+        let oldItems = [];
+        try { oldItems = raw ? JSON.parse(raw) : []; } catch {}
+        if (Array.isArray(oldItems) && oldItems.length > 0) {
+          for (const item of oldItems.slice().reverse()) {
+            await fetch("/api/analyses", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item) }).catch(() => {});
+          }
+        }
+        lsSet("david-migrated", "1");
+      }
+      const r = await fetch("/api/analyses").catch(() => null);
+      if (r && r.ok) {
+        const list = await r.json().catch(() => []);
+        if (Array.isArray(list)) setSaved(list);
+      }
+    })();
   }, []);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMsgs, chatLoading]);
