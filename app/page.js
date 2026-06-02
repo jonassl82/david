@@ -507,15 +507,22 @@ async function callClaude(system, messages, maxTokens = 4000) {
   return data.content?.map((b) => b.text || "").join("\n") || "Geen antwoord.";
 }
 
-// ─── STORAGE (localStorage) ───────────────────────────────────────────────────
+// ─── STORAGE (localStorage met in-memory fallback) ───────────────────────────
 
-function lsGet(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
+const memStore = new Map();
+function storageGet(key) {
+  try {
+    const v = localStorage.getItem(key);
+    if (v !== null) return v;
+  } catch {}
+  return memStore.has(key) ? memStore.get(key) : null;
 }
-function lsSet(key, val) {
+function storageSet(key, val) {
+  memStore.set(key, val);
   try { localStorage.setItem(key, val); } catch {}
 }
-function lsDel(key) {
+function storageDel(key) {
+  memStore.delete(key);
   try { localStorage.removeItem(key); } catch {}
 }
 
@@ -655,6 +662,7 @@ export default function David() {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const chatEnd = useRef(null);
+  const chatLoadedRef = useRef(false);
 
   const [motieForm, setMotieForm] = useState({
     onderwerp: "", datum: "",
@@ -706,12 +714,20 @@ export default function David() {
   // Init (client-only)
   useEffect(() => {
     setReady(true);
-    const pw = lsGet("david-pw");
+    const pw = storageGet("david-pw");
     setAuthState(pw ? "login" : "setup");
+    const rawChat = storageGet("david-overleg");
+    if (rawChat) {
+      try {
+        const parsed = JSON.parse(rawChat);
+        if (Array.isArray(parsed)) setChatMsgs(parsed);
+      } catch {}
+    }
+    chatLoadedRef.current = true;
     (async () => {
       // Eenmalige migratie van oude localStorage-archieven naar Redis
-      if (lsGet("david-migrated") !== "1") {
-        const raw = lsGet("david-analyses");
+      if (storageGet("david-migrated") !== "1") {
+        const raw = storageGet("david-analyses");
         let oldItems = [];
         try { oldItems = raw ? JSON.parse(raw) : []; } catch {}
         if (Array.isArray(oldItems) && oldItems.length > 0) {
@@ -719,7 +735,7 @@ export default function David() {
             await fetch("/api/analyses", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item) }).catch(() => {});
           }
         }
-        lsSet("david-migrated", "1");
+        storageSet("david-migrated", "1");
       }
       const r = await fetch("/api/analyses").catch(() => null);
       if (r && r.ok) {
@@ -731,17 +747,22 @@ export default function David() {
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMsgs, chatLoading]);
 
+  useEffect(() => {
+    if (!chatLoadedRef.current) return;
+    storageSet("david-overleg", JSON.stringify(chatMsgs));
+  }, [chatMsgs]);
+
   if (!ready) return null;
 
   // ── AUTH ──
   const handleSetup = () => {
     if (pwInput.length < 4) { setAuthErr("Minimaal 4 tekens"); return; }
     if (pwInput !== pwConfirm) { setAuthErr("Wachtwoorden komen niet overeen"); return; }
-    lsSet("david-pw", simpleHash(pwInput));
+    storageSet("david-pw", simpleHash(pwInput));
     setAuthState("authenticated"); setPwInput(""); setPwConfirm(""); setAuthErr("");
   };
   const handleLogin = () => {
-    if (lsGet("david-pw") === simpleHash(pwInput)) {
+    if (storageGet("david-pw") === simpleHash(pwInput)) {
       setAuthState("authenticated"); setPwInput(""); setAuthErr("");
     } else setAuthErr("Onjuist wachtwoord");
   };
@@ -974,7 +995,7 @@ Geef een complete debatvoorbereiding.`;
           <>
             <input type="password" placeholder="Wachtwoord" value={pwInput} autoFocus onChange={(e) => { setPwInput(e.target.value); setAuthErr(""); }} onKeyDown={(e) => e.key === "Enter" && handleLogin()} style={inputStyle} />
             <button onClick={handleLogin} style={{ ...btnPrimary, marginTop: 16, width: "100%" }}>Inloggen</button>
-            <button onClick={() => { if (confirm("Wachtwoord resetten?")) { lsDel("david-pw"); setAuthState("setup"); setPwInput(""); setAuthErr(""); } }}
+            <button onClick={() => { if (confirm("Wachtwoord resetten?")) { storageDel("david-pw"); setAuthState("setup"); setPwInput(""); setAuthErr(""); } }}
               style={{ background: "none", border: "none", color: "#1b2d45", fontSize: 11, cursor: "pointer", fontFamily: "inherit", marginTop: 12, display: "block", width: "100%", textAlign: "center" }}>
               Wachtwoord vergeten?
             </button>
