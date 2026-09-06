@@ -396,12 +396,6 @@ Wees scherp, strategisch en concreet.`;
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
 
-function simpleHash(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) { h = ((h << 5) - h) + str.charCodeAt(i); h = h & h; }
-  return h.toString(36);
-}
-
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString("nl-NL", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
@@ -520,10 +514,6 @@ function storageGet(key) {
 function storageSet(key, val) {
   memStore.set(key, val);
   try { localStorage.setItem(key, val); } catch {}
-}
-function storageDel(key) {
-  memStore.delete(key);
-  try { localStorage.removeItem(key); } catch {}
 }
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -714,16 +704,30 @@ export default function David() {
   // Init (client-only)
   useEffect(() => {
     setReady(true);
-    const pw = storageGet("david-pw");
-    setAuthState(pw ? "login" : "setup");
-    const rawChat = storageGet("david-overleg");
-    if (rawChat) {
-      try {
-        const parsed = JSON.parse(rawChat);
-        if (Array.isArray(parsed)) setChatMsgs(parsed);
-      } catch {}
-    }
-    chatLoadedRef.current = true;
+    (async () => {
+      // Wachtwoord staat op de server, dus het blijft op elk apparaat gelden.
+      const r = await fetch("/api/auth").catch(() => null);
+      const cfg = r && r.ok ? await r.json().catch(() => null) : null;
+      setAuthState(cfg?.configured ? "login" : "setup");
+    })();
+    (async () => {
+      // Overleg staat op de server; oude lokale berichten gaan eenmalig mee.
+      const r = await fetch("/api/chat").catch(() => null);
+      let msgs = r && r.ok ? await r.json().catch(() => []) : [];
+      if (!Array.isArray(msgs)) msgs = [];
+      if (msgs.length === 0) {
+        const rawChat = storageGet("david-overleg");
+        try {
+          const parsed = rawChat ? JSON.parse(rawChat) : [];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            msgs = parsed;
+            await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(msgs) }).catch(() => {});
+          }
+        } catch {}
+      }
+      setChatMsgs(msgs);
+      chatLoadedRef.current = true;
+    })();
     (async () => {
       // Eenmalige migratie van oude localStorage-archieven naar Redis
       if (storageGet("david-migrated") !== "1") {
@@ -750,21 +754,32 @@ export default function David() {
   useEffect(() => {
     if (!chatLoadedRef.current) return;
     storageSet("david-overleg", JSON.stringify(chatMsgs));
+    fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(chatMsgs) }).catch(() => {});
   }, [chatMsgs]);
 
   if (!ready) return null;
 
   // ── AUTH ──
-  const handleSetup = () => {
+  const submitPw = async (pw) => {
+    const r = await fetch("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw }),
+    }).catch(() => null);
+    if (!r) { setAuthErr("Geen verbinding"); return false; }
+    const data = await r.json().catch(() => ({}));
+    if (!data.ok) { setAuthErr(data.error || "Onjuist wachtwoord"); return false; }
+    return true;
+  };
+  const handleSetup = async () => {
     if (pwInput.length < 4) { setAuthErr("Minimaal 4 tekens"); return; }
     if (pwInput !== pwConfirm) { setAuthErr("Wachtwoorden komen niet overeen"); return; }
-    storageSet("david-pw", simpleHash(pwInput));
+    if (!(await submitPw(pwInput))) return;
     setAuthState("authenticated"); setPwInput(""); setPwConfirm(""); setAuthErr("");
   };
-  const handleLogin = () => {
-    if (storageGet("david-pw") === simpleHash(pwInput)) {
-      setAuthState("authenticated"); setPwInput(""); setAuthErr("");
-    } else setAuthErr("Onjuist wachtwoord");
+  const handleLogin = async () => {
+    if (!(await submitPw(pwInput))) return;
+    setAuthState("authenticated"); setPwInput(""); setAuthErr("");
   };
 
   // ── UPLOAD ──
@@ -995,10 +1010,9 @@ Geef een complete debatvoorbereiding.`;
           <>
             <input type="password" placeholder="Wachtwoord" value={pwInput} autoFocus onChange={(e) => { setPwInput(e.target.value); setAuthErr(""); }} onKeyDown={(e) => e.key === "Enter" && handleLogin()} style={inputStyle} />
             <button onClick={handleLogin} style={{ ...btnPrimary, marginTop: 16, width: "100%" }}>Inloggen</button>
-            <button onClick={() => { if (confirm("Wachtwoord resetten?")) { storageDel("david-pw"); setAuthState("setup"); setPwInput(""); setAuthErr(""); } }}
-              style={{ background: "none", border: "none", color: "#1b2d45", fontSize: 11, cursor: "pointer", fontFamily: "inherit", marginTop: 12, display: "block", width: "100%", textAlign: "center" }}>
-              Wachtwoord vergeten?
-            </button>
+            <p style={{ color: "#1b2d45", fontSize: 11, marginTop: 12, textAlign: "center", opacity: 0.7 }}>
+              Hetzelfde wachtwoord werkt op al je apparaten.
+            </p>
           </>
         )}
         {authErr && <p style={{ color: "#ef4444", fontSize: 12, marginTop: 10, textAlign: "center" }}>{authErr}</p>}
